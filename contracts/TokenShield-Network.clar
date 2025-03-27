@@ -532,3 +532,76 @@
     )
   )
 )
+
+;; Process secure withdrawals
+(define-public (process-secure-withdrawal (vault-id uint) (withdraw-amount uint) (approval-sig (buff 65)))
+  (begin
+    (asserts! (valid-vault-id? vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultStorage { vault-id: vault-id }) ERR_NO_VAULT))
+        (creator (get creator vault-data))
+        (recipient (get recipient vault-data))
+        (amount (get amount vault-data))
+        (state (get vault-state vault-data))
+      )
+      ;; Only admin can process secure withdrawals
+      (asserts! (is-eq tx-sender CONTRACT_ADMIN) ERR_NOT_ALLOWED)
+      ;; Only from disputed vaults
+      (asserts! (is-eq state "disputed") (err u220))
+      ;; Amount validation
+      (asserts! (<= withdraw-amount amount) ERR_BAD_AMOUNT)
+      ;; Minimum timelock before withdrawal (48 blocks, ~8 hours)
+      (asserts! (>= block-height (+ (get start-block vault-data) u48)) (err u221))
+
+      ;; Process withdrawal
+      (unwrap! (as-contract (stx-transfer? withdraw-amount tx-sender creator)) ERR_TRANSFER_FAILED)
+
+      ;; Update vault record
+      (map-set VaultStorage
+        { vault-id: vault-id }
+        (merge vault-data { amount: (- amount withdraw-amount) })
+      )
+
+      (print {action: "withdrawal_processed", vault-id: vault-id, creator: creator, 
+              amount: withdraw-amount, remaining: (- amount withdraw-amount)})
+      (ok true)
+    )
+  )
+)
+
+;; Execute timelock withdrawal
+(define-public (execute-timelock-withdrawal (vault-id uint))
+  (begin
+    (asserts! (valid-vault-id? vault-id) ERR_BAD_ID)
+    (let
+      (
+        (vault-data (unwrap! (map-get? VaultStorage { vault-id: vault-id }) ERR_NO_VAULT))
+        (creator (get creator vault-data))
+        (amount (get amount vault-data))
+        (state (get vault-state vault-data))
+        (timelock-blocks u24) ;; 24 blocks timelock (~4 hours)
+      )
+      ;; Only creator or admin can execute
+      (asserts! (or (is-eq tx-sender creator) (is-eq tx-sender CONTRACT_ADMIN)) ERR_NOT_ALLOWED)
+      ;; Only from pending-withdrawal state
+      (asserts! (is-eq state "withdrawal-pending") (err u301))
+      ;; Timelock must have expired
+      (asserts! (>= block-height (+ (get start-block vault-data) timelock-blocks)) (err u302))
+
+      ;; Process withdrawal
+      (unwrap! (as-contract (stx-transfer? amount tx-sender creator)) ERR_TRANSFER_FAILED)
+
+      ;; Update vault status
+      (map-set VaultStorage
+        { vault-id: vault-id }
+        (merge vault-data { vault-state: "withdrawn", amount: u0 })
+      )
+
+      (print {action: "timelock_withdrawal_complete", vault-id: vault-id, 
+              creator: creator, amount: amount})
+      (ok true)
+    )
+  )
+)
+
